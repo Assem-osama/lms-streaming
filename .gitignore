@@ -1,0 +1,18 @@
+# Environment variables & Secrets
+.env
+
+# Large datasets & storage
+data/
+*.csv
+
+# Docker volumes
+nifi_conf/
+lms_pg_data/
+spark_checkpoint/
+kafka_data/
+
+# Python / IDE cache
+__pycache__/
+*.pyc
+.vscode/
+.idea/

@@ -1,0 +1,206 @@
+services:
+
+  kafka:
+    image: apache/kafka:latest
+    container_name: lms-kafka
+    mem_limit: 768m
+
+    ports:
+      - "29092:29092"
+
+    environment:
+    # kraft mode
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+    # internal, external and controller listeners
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_EXTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_EXTERNAL://127.0.0.1:29092
+
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+
+      KAFKA_HEAP_OPTS: "-Xms384m -Xmx512m"
+
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 >/dev/null 2>&1 || exit 1"
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+
+    networks:
+      - lms-net
+
+
+  nifi:
+    image: apache/nifi:latest
+    container_name: lms-nifi
+    mem_limit: 1536m
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+    ports:
+      - "127.0.0.1:8443:8443"
+
+    environment:
+      SINGLE_USER_CREDENTIALS_USERNAME: ${NIFI_USER:?}
+      SINGLE_USER_CREDENTIALS_PASSWORD: ${NIFI_PASSWORD:?}
+
+      NIFI_JVM_HEAP_INIT: 512m
+      NIFI_JVM_HEAP_MAX: 1g
+
+    volumes:
+      - nifi_conf:/opt/nifi/nifi-current/conf
+
+    restart: "no"
+
+    profiles:
+      - ingest
+
+    networks:
+      - lms-net
+
+  lms-postgres:
+    image: postgres:16
+    container_name: lms-postgres
+    hostname: lms-postgres
+    mem_limit: 384m
+
+    ports:
+      - "127.0.0.1:5433:5432"
+
+    environment:
+      POSTGRES_DB: ${LMS_DB:?}
+      POSTGRES_USER: ${LMS_DB_USER:?}
+      POSTGRES_PASSWORD: ${LMS_DB_PASSWORD:?}
+
+    volumes:
+      - lms_pg_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+    restart: "no"
+
+    profiles:
+      - process
+
+    networks:
+      - lms-net
+
+
+  spark-stream:
+    image: apache/spark:3.5.6-python3
+    container_name: lms-spark-stream
+    user: root
+    mem_limit: 1536m
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+      lms-postgres:
+        condition: service_healthy
+
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+
+      LMS_DB: ${LMS_DB:?}
+      LMS_DB_USER: ${LMS_DB_USER:?}
+      LMS_DB_PASSWORD: ${LMS_DB_PASSWORD:?}
+
+    command:
+      [
+        "/opt/spark/bin/spark-submit",
+        "/opt/jobs/streaming_job.py"
+      ]
+
+    ports:
+      - "127.0.0.1:4040:4040"
+
+    volumes:
+      - ./spark/jobs:/opt/jobs:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+      - ./data:/opt/data:ro
+
+      - spark_ivy:/ivy
+      - spark_checkpoint:/opt/spark/checkpoints
+
+    restart: "no"
+
+    profiles:
+      - process
+
+    networks:
+      - lms-net
+
+
+  # =========================
+  # KAFKA UI
+  # =========================
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: lms-kafka-ui
+    mem_limit: 512m
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+    ports:
+      - "127.0.0.1:8090:8080"
+
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+    profiles:
+      - ui
+
+    networks:
+      - lms-net
+
+
+# NETWORKS
+networks:
+  lms-net:
+    driver: bridge
+    name: lms-net
+
+
+# VOLUMES
+volumes:
+  kafka_data:
+  nifi_conf:
+  lms_pg_data:
+  spark_checkpoint:
+
+  spark_ivy:
+    external: true
+    name: realtime-fraud-hdfs-lakehouse_spark_ivy
